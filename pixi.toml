@@ -1,0 +1,10 @@
+[project]
+authors = ["Nick"]
+channels = ["conda-forge"]
+name = "DA-flight"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
