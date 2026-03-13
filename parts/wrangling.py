@@ -13,3 +13,16 @@ for table in tables["name"]:
     print(table)
     print(pd.read_sql_query("SELECT * FROM " + table + " LIMIT 6;", connect))
     print()
+
+#cleaning 
+flights = pd.read_sql_query("SELECT * FROM flights;", connect)
+
+# missing values
+print("Missing Vals")
+print(flights.isna().sum().sort_values(ascending=False))
+print()
+# duplicates
+dupl_cols = ["year", "month", "day", "carrier", "flight", "origin", "dest", "sched_dep_time"]
+duplicates = flights[flights.duplicated(subset=dupl_cols, keep=False)]
+print("Duplicates:", len(duplicates))
+print(duplicates.head(5))
