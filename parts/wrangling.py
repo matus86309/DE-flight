@@ -56,14 +56,42 @@ flights.loc[mask, "sched_arr_dt"] = flights.loc[mask, "sched_arr_dt"] + pd.Timed
 mask = flights["arr_dt"] < flights["dep_dt"]
 flights.loc[mask, "arr_dt"] = flights.loc[mask, "arr_dt"] + pd.Timedelta(days=1)
 
-# check delays and air time match the datetime 
+# check delays match the datetime 
 def check_consistency(df):
     df["calc_dep_delay"] = (df["dep_dt"] - df["sched_dep_dt"]).dt.total_seconds() / 60
     df["calc_arr_delay"] = (df["arr_dt"] - df["sched_arr_dt"]).dt.total_seconds() / 60
-    df["calc_air_time"]  = (df["arr_dt"] - df["dep_dt"]).dt.total_seconds() / 60
 
     print("dep_delay match rate:", round((( df["dep_delay"] - df["calc_dep_delay"]).abs() <= 5).mean(), 3))
     print("arr_delay match rate:", round(((df["arr_delay"] - df["calc_arr_delay"]).abs() <= 5).mean(), 3))
-    print("air_time  match rate:", round(((df["air_time"]  - df["calc_air_time"] ).abs() <= 5).mean(), 3))
 
 check_consistency(flights) 
+
+# timezone info for each airport
+airports = pd.read_sql_query("SELECT faa, tzone FROM airports;", connect)
+
+# merge destination timezone
+flights = flights.merge(
+    airports.rename(columns={"faa": "dest", "tzone": "dest_tz"}),
+    on="dest",
+    how="left"
+)
+
+# local arrival time at destination
+flights["arr_local"] = None
+
+for i in flights.index:
+    if pd.isna(flights.at[i, "arr_dt"]) or pd.isna(flights.at[i, "dest_tz"]):
+        continue
+
+    arr_local = pd.Timestamp(flights.at[i, "arr_dt"]).tz_localize(
+        flights.at[i, "dest_tz"],
+        nonexistent="shift_forward",
+        ambiguous="NaT"
+    )
+
+    flights.at[i, "arr_local"] = arr_local
+
+print(flights[["origin", "dest", "arr_dt", "dest_tz", "arr_local"]].head(10))
+
+flights.to_csv("flights_cleaned.csv", index=False)
+connect.close()
