@@ -23,6 +23,47 @@ print(flights.isna().sum().sort_values(ascending=False))
 print()
 # duplicates
 dupl_cols = ["year", "month", "day", "carrier", "flight", "origin", "dest", "sched_dep_time"]
-duplicates = flights[flights.duplicated(subset=dupl_cols, keep=False)]
+duplicates = flights[flights.duplicated(subset=dupl_cols, keep=False)].sort_values(dupl_cols)
 print("Duplicates:", len(duplicates))
 print(duplicates.head(5))
+
+# convert hhmm format 
+def hhmm_to_minutes(x):
+    if pd.isna(x):
+        return float("nan")
+    x = int(x)
+    hours = x // 100
+    minutes = x % 100
+    return hours * 60 + minutes
+
+#datetime column with year/month/day + hhmm column
+def add_datetime(df, hhmm_col, new_col):
+    base_date = pd.to_datetime(df[["year", "month", "day"]])
+    minutes = df[hhmm_col].apply(hhmm_to_minutes)
+    df[new_col] = base_date + pd.to_timedelta(minutes, unit="m")
+    return df
+
+# convert all time columns to datetime
+flights = add_datetime(flights, "sched_dep_time", "sched_dep_dt")
+flights = add_datetime(flights, "dep_time", "dep_dt")
+flights = add_datetime(flights, "sched_arr_time", "sched_arr_dt")
+flights = add_datetime(flights, "arr_time", "arr_dt")
+
+#overnight flights 
+mask = flights["sched_arr_dt"] < flights["sched_dep_dt"]
+flights.loc[mask, "sched_arr_dt"] = flights.loc[mask, "sched_arr_dt"] + pd.Timedelta(days=1)
+
+mask = flights["arr_dt"] < flights["dep_dt"]
+flights.loc[mask, "arr_dt"] = flights.loc[mask, "arr_dt"] + pd.Timedelta(days=1)
+
+# check delays and air time match the datetime 
+def check_consistency(df):
+    df["calc_dep_delay"] = (df["dep_dt"] - df["sched_dep_dt"]).dt.total_seconds() / 60
+    df["calc_arr_delay"] = (df["arr_dt"] - df["sched_arr_dt"]).dt.total_seconds() / 60
+    df["calc_air_time"]  = (df["arr_dt"] - df["dep_dt"]).dt.total_seconds() / 60
+
+    print("dep_delay match rate:", round((( df["dep_delay"] - df["calc_dep_delay"]).abs() <= 5).mean(), 3))
+    print("arr_delay match rate:", round(((df["arr_delay"] - df["calc_arr_delay"]).abs() <= 5).mean(), 3))
+    print("air_time  match rate:", round(((df["air_time"]  - df["calc_air_time"] ).abs() <= 5).mean(), 3))
+
+check_consistency(flights) 
