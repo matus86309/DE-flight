@@ -93,5 +93,5 @@ for i in flights.index:
 
 print(flights[["origin", "dest", "arr_dt", "dest_tz", "arr_local"]].head(10))
 
-flights.to_csv("flights_cleaned.csv", index=False)
+flights.to_sql("flights_cleaned", connect, if_exists="replace", index=False)
 connect.close()
