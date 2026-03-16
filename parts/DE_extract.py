@@ -98,23 +98,16 @@ def get_daily_statistics(day,month):
 def get_flight_trajectory(departing_airport,arriving_airport):
 
     #get the tailnumber of all flights between selected airports
-    query_a = f"SELECT tailnum FROM flights WHERE origin = '{departing_airport}' AND dest = '{arriving_airport}';"
-    cursor.execute(query_a)
-    tailnums = cursor.fetchall()
-    route_tailnums = [i[0] for i in tailnums if i[0] is not None]
+    query = f"""
+            SELECT planes.type, COUNT(*)
+            FROM flight
+            JOIN planes ON flights.tailnum = planes.tailnum
+            WHERE flights.origin = {departing_airport}
+                AND flights.destination = {arriving_airport}
+            GROUP BY planes.type"""
 
-    #match the tailnumber to type in planes table
-    type_distribution = {}
-    for number in route_tailnums:
-        query_b = f"SELECT type FROM planes WHERE tailnum = '{number}';"
-        cursor.execute(query_b)
-
-        plane_type = cursor.fetchone()[0]
-        if plane_type in type_distribution:
-            type_distribution[plane_type] += 1
-        else:
-            type_distribution[plane_type] = 1
-
+    cursor.execute(query)
+    type_distribution = dict(cursor.fetchall())
     return type_distribution
 
 
@@ -141,10 +134,31 @@ def get_carrier_delay():
     return delay_per_carrier
 
 
+def get_delayed_flight(month_range:[str],destinations_list:[str]):
+
+    #count the number of delayed flights in a given period
+    cursor.execute(f"SELECT COUNT(*) FROM flights WHERE arr_delay >0 AND month IN '{month_range}' AND dest IN '{destinations_list}';'")
+    num_days = cursor.fetchone()[0]
 
 
 
+def get_top_manufacturers(destination_airport):
 
+    #return the top 5 plane manufacturers from designated airport
+
+    query = f"""
+            SELECT planes.manufacturer, COUNT(*) AS num_flights
+            FROM flights
+            JOIN planes ON flights.tailnum = planes.tailnum
+            WHERE flights.dest = '{destination_airport}'
+            GROUP BY planes.manufacturer;
+            ORDER BY num_flights DESC
+            LIMIT 5;
+            """
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    top_5_manufacturers = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
+    return top_5_manufacturers
 
 
 connection.close()
