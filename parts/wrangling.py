@@ -93,5 +93,11 @@ for i in flights.index:
 
 print(flights[["origin", "dest", "arr_dt", "dest_tz", "arr_local"]].head(10))
 
+
+#convert to string to avoid crashing
+cols =  ["sched_dep_dt","dep_dt","sched_arr_dt","arr_dt","arr_local"]
+for i in cols:
+    flights[i] = flights[i].astype(str)
+
 flights.to_sql("flights_cleaned", connect, if_exists="replace", index=False)
 connect.close()
