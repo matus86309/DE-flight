@@ -1,6 +1,6 @@
 import sqlite3
 import pandas as pd
-
+from scipy.stats import linregress
 
 DB_PATH = "../data/flights_database.db"
 connection = sqlite3.connect(DB_PATH)
@@ -151,14 +151,65 @@ def get_top_manufacturers(destination_airport):
             FROM flights
             JOIN planes ON flights.tailnum = planes.tailnum
             WHERE flights.dest = '{destination_airport}'
-            GROUP BY planes.manufacturer;
+            GROUP BY planes.manufacturer
             ORDER BY num_flights DESC
-            LIMIT 5;
-            """
+            LIMIT 5;"""
+
     cursor.execute(query)
     rows = cursor.fetchall()
     top_5_manufacturers = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
     return top_5_manufacturers
 
 
+def get_distance_delay_ratio():
+
+    '''
+    we calculate the regression coefficient to investigate how delay and flight distance correlate.
+    '''
+
+    query = """ SELECT distance, arr_delay FROM flights WHERE distance IS NOT NULL AND arr_delay IS NOT NULL"""
+    delay_df = pd.read_sql(query, connection)
+
+    slope, intercept, r_val, p_val, std_error = linregress(delay_df['distance'], delay_df['arr_delay'])
+
+    return f" Expected baseline delay: {intercept:.3} ; additional delay for every mile travelled: {slope:.3}"
+
+
+
+def get_speed_for_model():
+
+
+    # get the average speed for all plane types using sql JOIN
+    query = """
+    SELECT 
+        planes.model,
+        AVG(flights.distance * 1.0 / flights.air_time) AS average_speed
+    FROM flights
+    JOIN planes ON flights.tailnum = planes.tailnum
+    GROUP BY planes.model;"""
+
+    #save as a pandas dataframe
+    avg_speed_df = pd.read_sql(query, connection)
+
+    for i, row in avg_speed_df.iterrows():
+        model = row['model']
+        speed = row['average_speed']
+
+        #write to the speed column for planes table
+        write = """
+            UPDATE planes
+            SET speed = ?
+            WHERE model = ?
+            """
+
+        #execute the query
+        cursor.execute(write, (speed, model))
+    #save the query once
+    connection.commit()
+
+
+
+
+
 connection.close()
+
