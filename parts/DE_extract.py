@@ -1,13 +1,48 @@
+import os
 import sqlite3
+import math
+import numpy as np
 import pandas as pd
+import plotly.express as px
 from scipy.stats import linregress
 from scipy.stats import ttest_ind
 
-DB_PATH = "../data/flights_database.db"
-connection = sqlite3.connect(DB_PATH)
+DB_PATH = os.path.join(os.path.dirname(__file__), "../data/flights_database.db")
+connection = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = connection.cursor()
 
+# JFK coordinates used as NYC origin for bearing/inner-product calculations
+JFK_LAT = 40.6413
+JFK_LON = -73.7781
 
+
+def _bearing(lat1, lon1, lat2, lon2):
+    """Compass bearing in degrees [0, 360) from point 1 to point 2."""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlon = lon2 - lon1
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def _bearing_vec(lat1, lon1, lat2, lon2):
+    """Vectorised version of _bearing that works on numpy arrays."""
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlon = lon2 - lon1
+    x = np.sin(dlon) * np.cos(lat2)
+    y = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlon)
+    return np.degrees(np.arctan2(x, y)) % 360
+
+
+def _to_cardinal(bearing_deg):
+    if bearing_deg > 315 or bearing_deg <= 45:
+        return "North"
+    elif bearing_deg <= 135:
+        return "East"
+    elif bearing_deg <= 225:
+        return "South"
+    else:
+        return "West"
 
 
 def get_incoming_airport_info():
@@ -29,54 +64,49 @@ def get_incoming_airport_info():
 
     return origin_airport_df
 
-def get_daily_outbound_log(day,month):
-
-    # select the destination, tailnumber and carrier of all outbound flights for a given day
-    query = f"SELECT dest,carrier,flight from flights WHERE day = '{day}' AND month = '{month}'; "
+def get_daily_outbound_log(day, month, origin=None):
+    """
+    Returns outbound flights for the given day/month.
+    """
+    origin_filter = f"AND origin = '{origin}'" if origin else ""
+    query = f"SELECT dest, carrier, flight FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};"
     cursor.execute(query)
     rows = cursor.fetchall()
-    daily_outbound_log = pd.DataFrame(rows,columns=[x[0] for x in cursor.description])
+    daily_outbound_log = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
     return daily_outbound_log
 
 
-def get_daily_statistics(day,month):
-
+def get_daily_statistics(day, month, origin=None):
     '''
-    create a dict containing a daily briefing for the selected day and month
+    Create a daily briefing DataFrame for the selected day and month.
     '''
+    origin_filter = f"AND origin = '{origin}'" if origin else ""
 
     # number of distinct flights
-    num_flight_query = f"SELECT COUNT(DISTINCT flight) FROM flights WHERE day = '{day}' AND month = '{month}';"
-    cursor.execute(num_flight_query)
+    cursor.execute(f"SELECT COUNT(DISTINCT flight) FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};")
     num_flight = cursor.fetchone()[0]
 
     #number of unique destinations
-    num_unique_destinations_query = f"SELECT COUNT(DISTINCT dest) FROM flights WHERE day = '{day}' AND month = '{month}';"
-    cursor.execute(num_unique_destinations_query)
+    cursor.execute(f"SELECT COUNT(DISTINCT dest) FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};")
     num_unique_destinations = cursor.fetchone()[0]
 
-
-
-    most_visited_query = (f"SELECT dest from flights "
-                          f"WHERE day = '{day}' AND month = '{month}' "
-                          f"GROUP BY dest ORDER BY COUNT(dest) DESC "
-                          f"LIMIT 1;")
-    cursor.execute(most_visited_query)
+    cursor.execute(
+        f"SELECT dest FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter} "
+        f"GROUP BY dest ORDER BY COUNT(dest) DESC LIMIT 1;"
+    )
     most_visited = cursor.fetchone()[0]
 
-
-    least_visited_query = (f"SELECT dest from flights "
-                                 f"WHERE day = '{day}' AND month = '{month}' "
-                                 f"GROUP BY dest ORDER BY COUNT(dest) ASC "
-                                 f"LIMIT 1;")
-    cursor.execute(least_visited_query)
+    cursor.execute(
+        f"SELECT dest FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter} "
+        f"GROUP BY dest ORDER BY COUNT(dest) ASC LIMIT 1;"
+    )
     least_visited = cursor.fetchone()[0]
 
-    #calculate average business
-    cursor.execute("SELECT COUNT(*) FROM flights;")
+    #calculate average business (scoped to same origin if provided)
+    cursor.execute(f"SELECT COUNT(*) FROM flights WHERE 1=1 {origin_filter};")
     total_flights = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(DISTINCT month || '-' || day) FROM flights;")
+    cursor.execute(f"SELECT COUNT(DISTINCT month || '-' || day) FROM flights WHERE 1=1 {origin_filter};")
     num_days = cursor.fetchone()[0]
 
     average_business = total_flights / num_days
@@ -87,13 +117,11 @@ def get_daily_statistics(day,month):
     df_structure = {"Date": [f"{month}-{day}"],
                     "Today's traffic":  [num_flight],
                     "Business today": [daily_business],
-                    " Number of unique destinations": [num_unique_destinations],
+                    "Number of unique destinations": [num_unique_destinations],
                     "Most visited destination": [most_visited],
                     "Least visited destination": [least_visited],}
 
-    daily_briefing_df = pd.DataFrame(df_structure)
-
-    return daily_briefing_df
+    return pd.DataFrame(df_structure)
 
 
 def get_flight_trajectory(departing_airport,arriving_airport):
@@ -114,28 +142,24 @@ def get_flight_trajectory(departing_airport,arriving_airport):
 
 
 def get_carrier_delay():
+    """
+    Returns a DataFrame with average departure delay per airline.
+    Displays a barplot with full airline names on the (rotated) x-axis.
+    """
+    query = """
+        SELECT airlines.name, AVG(flights.dep_delay) AS avg_delay
+        FROM flights
+        JOIN airlines ON flights.carrier = airlines.carrier
+        WHERE flights.dep_delay IS NOT NULL
+        GROUP BY airlines.name
+        ORDER BY avg_delay DESC;
+    """
+    delay_df = pd.read_sql(query, connection)
 
-    #get all carriers
-    delay_per_carrier = {}
-    cursor.execute("SELECT DISTINCT carrier FROM flights;")
-    unique_carriers = [i[0] for i in cursor.fetchall()]
-
-    #calculate average delay per carrier
-    for carrier in unique_carriers:
-        cursor.execute(f"SELECT SUM(dep_delay) FROM flights WHERE carrier = '{carrier}';")
-        sum_delay = cursor.fetchone()[0]
-
-        cursor.execute(f"SELECT COUNT(*) FROM  flights WHERE carrier = '{carrier}';")
-        num_flights = cursor.fetchone()[0]
-
-        avg_delay = sum_delay/num_flights
-        delay_per_carrier[carrier] = avg_delay
-
-    #return a dict with avg delay for carriers
-    return delay_per_carrier
+    return delay_df
 
 
-def get_delayed_flight(month_range:[str],destinations_list:[str]):
+def get_delayed_flight(month_range:list[str],destinations_list:list[str]):
     #only use it with 'JFK'/'LAX' SQL ready format !
 
     #count the number of delayed flights in a given period
@@ -189,11 +213,12 @@ def get_speed_for_model():
 
     # get the average speed for all plane types using sql JOIN
     query = """
-    SELECT 
+    SELECT
         planes.model,
         AVG(flights.distance * 1.0 / flights.air_time) AS average_speed
     FROM flights
     JOIN planes ON flights.tailnum = planes.tailnum
+    WHERE flights.air_time IS NOT NULL AND flights.air_time > 0
     GROUP BY planes.model;"""
 
     #save as a pandas dataframe
@@ -219,85 +244,116 @@ def get_speed_for_model():
 
 
 def get_wind_direction():
-
-    # get the wind_dir variable for all outbound flights from JFK
-    query = "SELECT wind_dir FROM weather WHERE origin = 'JFK' AND wind_dir IS NOT NULL;"
+    """
+    For each unique destination airport, computes the compass bearing of the flight
+    path from JFK (the direction the plane follows), not the meteorological wind.
+    Returns a DataFrame with dest, bearing_deg, and cardinal_dir columns.
+    """
+    query = """
+        SELECT DISTINCT f.dest, a.lat, a.lon
+        FROM flights f
+        JOIN airports a ON f.dest = a.faa
+        WHERE a.lat IS NOT NULL AND a.lon IS NOT NULL;
+    """
     cursor.execute(query)
     rows = cursor.fetchall()
 
-    directions = []
+    results = []
+    for dest, lat, lon in rows:
+        bearing_deg = _bearing(JFK_LAT, JFK_LON, lat, lon)
+        results.append({
+            'dest': dest,
+            'bearing_deg': round(bearing_deg, 1),
+            'cardinal_dir': _to_cardinal(bearing_deg),
+        })
 
-    #convert the degrees into direction
-    for row in rows:
-        degrees  = row[0]
-        if degrees > 315 or degrees <= 45:
-            direction = "North"
-        elif degrees >45 and degrees <= 135:
-            direction = "East"
-        elif degrees >135 and degrees <= 225:
-            direction = "South"
-        else:
-            direction = "West"
-        directions.append(direction)
-    wind_dir = pd.DataFrame(directions, columns=["wind_dir"])
-    #get the direction dataframe
-    return wind_dir
+    return pd.DataFrame(results)
 
 
 def get_inner_product(flight_id):
-
-    '''
-    get the merged day-month for the unique flight id, match it to the weather table on day-month object
-    return the inner product of the wind_dir degrees and the wind_speed
-    '''
-
+    """
+    Computes the 2D inner product (dot product) of:
+      - the unit vector along the flight's bearing (origin -> destination)
+      - the wind velocity vector (wind_speed in the direction the wind blows toward)
+    Positive = tailwind, negative = headwind.
+    """
     query = f"""
-            SELECT flights.flight,
-                (flights.month || '-' || flights.day) AS daytime,
-                weather.wind_dir,
-                weather.wind_speed,
-                (weather.wind_speed * weather.wind_dir) AS inner_product
-            FROM flights
-            JOIN weather ON (flights.month || '-' || flights.day) = (weather.month || '-' || weather.day)
-            WHERE flights.flight = '{flight_id}';"""
+        SELECT flights.origin, flights.dest,
+               weather.wind_dir, weather.wind_speed,
+               orig_ap.lat, orig_ap.lon,
+               dest_ap.lat, dest_ap.lon
+        FROM flights
+        JOIN weather ON flights.origin = weather.origin
+            AND flights.month = weather.month
+            AND flights.day = weather.day
+            AND flights.hour = weather.hour
+        JOIN airports AS orig_ap ON flights.origin = orig_ap.faa
+        JOIN airports AS dest_ap ON flights.dest = dest_ap.faa
+        WHERE flights.flight = '{flight_id}'
+            AND weather.wind_dir IS NOT NULL
+            AND weather.wind_speed IS NOT NULL
+        LIMIT 1;
+    """
     cursor.execute(query)
-    inner_product= cursor.fetchone()
+    row = cursor.fetchone()
+    if row is None:
+        return None
 
-    return inner_product[4]
+    _, _, wind_dir, wind_speed, orig_lat, orig_lon, dest_lat, dest_lon = row
+
+    # flight direction: unit vector in the bearing direction from origin to destination
+    bearing_rad = math.radians(_bearing(orig_lat, orig_lon, dest_lat, dest_lon))
+    flight_vec = (math.sin(bearing_rad), math.cos(bearing_rad))
+
+    # wind vector: wind_dir is direction wind blows FROM (meteorological convention),
+    # so add 180° to get the direction it blows toward
+    wind_toward_rad = math.radians((wind_dir + 180) % 360)
+    wind_vec = (wind_speed * math.sin(wind_toward_rad), wind_speed * math.cos(wind_toward_rad))
+
+    return flight_vec[0] * wind_vec[0] + flight_vec[1] * wind_vec[1]
 
 
 def wind_speed_innerprod_regression():
-
-    '''
-    this function gets a dataframe of all inner products of flights and their corresponding airtime
-    then sorts the inner product into positive or negative bucket
-    then it runs a T-test to see if the inner prod and air time have statistically signifiant correlation
-    '''
-
-    #get inner_prod, air_time
-    query= f"""
-            SELECT flights.air_time,
-                (weather.wind_speed * weather.wind_dir) AS inner_product
-            FROM flights
-            JOIN weather
-                ON (flights.month || '-' || flights.day) = (weather.month || '-' || weather.day)
-                AND flights.origin = weather.origin
-                AND flights.month = weather.month
-                AND flights.day = weather.day
-                AND flights.hour = weather.hour
-            WHERE flights.air_time IS NOT NULL
-                AND weather.wind_speed IS NOT NULL;"""
-
+    """
+    Computes the 2D inner product of the flight direction vector and wind vector for all
+    flights, splits into tailwind (>0) and headwind (<0) groups, then runs a T-test
+    to check whether wind direction has a significant effect on air time.
+    """
+    query = """
+        SELECT flights.air_time,
+               weather.wind_dir, weather.wind_speed,
+               orig_ap.lat AS orig_lat, orig_ap.lon AS orig_lon,
+               dest_ap.lat AS dest_lat, dest_ap.lon AS dest_lon
+        FROM flights
+        JOIN weather ON flights.origin = weather.origin
+            AND flights.month = weather.month
+            AND flights.day = weather.day
+            AND flights.hour = weather.hour
+        JOIN airports AS orig_ap ON flights.origin = orig_ap.faa
+        JOIN airports AS dest_ap ON flights.dest = dest_ap.faa
+        WHERE flights.air_time IS NOT NULL
+            AND weather.wind_speed IS NOT NULL
+            AND weather.wind_dir IS NOT NULL;
+    """
     df = pd.read_sql(query, connection)
 
-    #split to positive negatibe
-    postive = df[df['inner_product'] >0]['air_time']
+    # Vectorised bearing and inner product calculation
+    bearings = _bearing_vec(df['orig_lat'].values, df['orig_lon'].values,
+                            df['dest_lat'].values, df['dest_lon'].values)
+    bearing_rad = np.radians(bearings)
+    flight_x, flight_y = np.sin(bearing_rad), np.cos(bearing_rad)
+
+    wind_toward_rad = np.radians((df['wind_dir'].values + 180) % 360)
+    wind_x = df['wind_speed'].values * np.sin(wind_toward_rad)
+    wind_y = df['wind_speed'].values * np.cos(wind_toward_rad)
+
+    df['inner_product'] = flight_x * wind_x + flight_y * wind_y
+
+    positive = df[df['inner_product'] > 0]['air_time']
     negative = df[df['inner_product'] < 0]['air_time']
 
-    #run the t-test
-    t_stat,p_value = ttest_ind(postive, negative, nan_policy = 'omit')
+    t_stat, p_value = ttest_ind(positive, negative, nan_policy='omit')
 
-    return f"there is {p_value:.3f} correlation between wind and airtime"
+    return f"T-test p-value: {p_value:.3f} — {'significant' if p_value < 0.05 else 'no significant'} correlation between wind direction and air time"
 
 
-connection.close()
