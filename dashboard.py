@@ -20,6 +20,29 @@ from data import (
     get_visibility_delay_stats,
 )
 
+def get_airport_color(airport_name, default=None):
+    """Get airport color that adapts to dark/light mode"""
+    is_dark = st.config.get_option("theme.base") == "dark"
+    
+    color_schemes = {
+        "JFK": {"light": "#e74c3c", "dark": "#ff6b6b"},     # Red variants
+        "LGA": {"light": "#27ae60", "dark": "#2ecc71"},     # Blue variants
+        "EWR": {"light": "#f39c12", "dark": "#f8b739"},     # Orange variants
+    }
+
+    if default is not None and airport_name not in color_schemes: 
+        return default
+    
+    scheme = color_schemes.get(airport_name, {"light": "#3498db", "dark": "#5dade2"})
+    return scheme["dark"] if is_dark else scheme["light"]
+
+def style_airport_names(val):
+    """Color code airport names in tables"""
+    color =  get_airport_color(val, default=False)
+    if color != False:
+        return f"color: {color}"
+    return ""
+
 st.set_page_config(page_title="NYC Flights Dashboard", layout="wide")
 
 # ── Navigation bar ────────────────────────────────────────────────────────────
@@ -74,6 +97,7 @@ if page == "Overview":
     fig = px.bar(delay_df, x="name", y="avg_delay",
                  labels={"name": "Airline", "avg_delay": "Avg Delay (min)"})
     fig.update_layout(xaxis_tickangle=-45)
+    fig.update_traces(marker_color=get_airport_color(selected_origin))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -125,19 +149,17 @@ elif page == "Delay Analysis":
 
     st.subheader("Average Departure Delay by Hour of Day")
     hourly_df = get_hourly_delay_stats(origin_param)
-    st.plotly_chart(
-        px.line(hourly_df, x="hour", y="avg_delay",
-                labels={"hour": "Hour of Day", "avg_delay": "Avg Delay (min)"}),
-        use_container_width=True,
-    )
+    fig1 = px.line(hourly_df, x="hour", y="avg_delay",
+                labels={"hour": "Hour of Day", "avg_delay": "Avg Delay (min)"})
+    fig1.update_traces(line_color=get_airport_color(origin))
+    st.plotly_chart(fig1, use_container_width=True)
 
     st.subheader("Average Departure Delay by Month")
     monthly_df = get_monthly_delay_stats(origin_param)
-    st.plotly_chart(
-        px.bar(monthly_df, x="month", y="avg_delay",
-               labels={"month": "Month", "avg_delay": "Avg Delay (min)"}),
-        use_container_width=True,
-    )
+    fig2 = px.bar(monthly_df, x="month", y="avg_delay",
+                 labels={"month": "Month", "avg_delay": "Avg Delay (min)"})
+    fig2.update_traces(marker_color=get_airport_color(origin))
+    st.plotly_chart(fig2, use_container_width=True)
 
     st.subheader("Weather Impact on Delays")
     col1, col2 = st.columns(2)
@@ -145,21 +167,19 @@ elif page == "Delay Analysis":
     with col1:
         st.markdown("**Precipitation vs Avg Departure Delay**")
         precip_df = get_precipitation_delay_stats(origin_param)
-        st.plotly_chart(
-            px.bar(precip_df, x="precipitation", y="avg_delay",
-                   labels={"precipitation": "Precipitation (inches)", "avg_delay": "Avg Delay (min)"}),
-            use_container_width=True,
-        )
+        fig3 = px.bar(precip_df, x="precipitation", y="avg_delay",
+                   labels={"precipitation": "Precipitation (inches)", "avg_delay": "Avg Delay (min)"})
+        fig3.update_traces(marker_color=get_airport_color(origin))
+        st.plotly_chart(fig3, use_container_width=True)
 
     with col2:
         st.markdown("**Visibility vs Avg Departure Delay**")
         visib_df = get_visibility_delay_stats(origin_param)
-        st.plotly_chart(
-            px.line(visib_df, x="visibility", y="avg_delay",
+        fig4 = px.line(visib_df, x="visibility", y="avg_delay",
                     labels={"visibility": "Visibility (miles)", "avg_delay": "Avg Delay (min)"},
-                    markers=True),
-            use_container_width=True,
-        )
+                    markers=True)
+        fig4.update_traces(line_color=get_airport_color(origin), marker_color=get_airport_color(origin))
+        st.plotly_chart(fig4, use_container_width=True,)
 
 
 # ── PAGE 4: Daily Statistics ──────────────────────────────────────────────────
@@ -197,7 +217,9 @@ elif page == "Daily Statistics":
     col6.metric("Least Visited", stats_dict["Least Visited"])
 
     st.subheader("Inbound Flights")
-    st.dataframe(get_daily_inbound_log(day, month, origin_param), use_container_width=True)
+    inbound_df = get_daily_inbound_log(day, month, dest=origin_param).style.map(style_airport_names, subset=["destination"])
+    st.dataframe(inbound_df, use_container_width=True)
 
     st.subheader("Outbound Flights")
-    st.dataframe(get_daily_outbound_log(day, month, origin_param), use_container_width=True)
+    outbound_df = get_daily_outbound_log(day, month, origin_param).style.map(style_airport_names, subset=["origin"])
+    st.dataframe(outbound_df, use_container_width=True)
