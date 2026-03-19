@@ -3,26 +3,18 @@ import sqlite3
 import math
 import numpy as np
 import pandas as pd
+import streamlit as st
 import plotly.express as px
 from scipy.stats import linregress
 from scipy.stats import ttest_ind
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "../data/flights_database.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "./data/flights_database.db")
 connection = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = connection.cursor()
 
 # JFK coordinates used as NYC origin for bearing/inner-product calculations
 JFK_LAT = 40.6413
 JFK_LON = -73.7781
-
-
-def _bearing(lat1, lon1, lat2, lon2):
-    """Compass bearing in degrees [0, 360) from point 1 to point 2."""
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlon = lon2 - lon1
-    x = math.sin(dlon) * math.cos(lat2)
-    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
-    return math.degrees(math.atan2(x, y)) % 360
 
 
 def _bearing_vec(lat1, lon1, lat2, lon2):
@@ -45,6 +37,50 @@ def _to_cardinal(bearing_deg):
         return "West"
 
 
+# ── Cached Data Retrieval Functions ───────────────────────────────────────────
+@st.cache_resource
+def get_distinct_origins():
+    """Returns cached list of distinct origin airports, sorted."""
+    return pd.read_sql("SELECT DISTINCT origin FROM flights ORDER BY origin;", connection)["origin"].tolist()
+
+
+@st.cache_resource
+def get_distinct_destinations():
+    """Returns cached list of distinct destination airports, sorted."""
+    return pd.read_sql("SELECT DISTINCT dest FROM flights ORDER BY dest;", connection)["dest"].tolist()
+
+
+def get_filtered_flight_metrics(origin=None, month_start=None, month_end=None):
+    """
+    Returns filtered flight metrics for a given origin and month range.
+    Args:
+        origin: Origin airport code (e.g., 'JFK'), or None for all
+        month_start: Starting month (1-12), or None for all
+        month_end: Ending month (1-12), or None for all
+    """
+    filters = []
+    if origin:
+        filters.append(f"origin = '{origin}'")
+    if month_start and month_end:
+        filters.append(f"month BETWEEN {month_start} AND {month_end}")
+    
+    where_clause = " AND ".join(filters) if filters else "1=1"
+    
+    query = f"""
+    SELECT 
+        (SELECT COUNT(*) FROM flights WHERE {where_clause}) AS total_flights,
+        (SELECT COUNT(DISTINCT dest) FROM flights WHERE {where_clause}) AS unique_destinations,
+        (SELECT COUNT(DISTINCT carrier) FROM flights WHERE {where_clause}) AS total_airlines
+    """
+    result = pd.read_sql(query, connection).iloc[0]
+    return {
+        'total_flights': int(result[0]),
+        'unique_destinations': int(result[1]),
+        'total_airlines': int(result[2])
+    }
+
+
+@st.cache_resource
 def get_incoming_airport_info():
 
     #get unique incoming airports
@@ -64,18 +100,34 @@ def get_incoming_airport_info():
 
     return origin_airport_df
 
+@st.cache_resource
+def get_daily_inbound_log(day, month, dest=None):
+    """
+    Returns outbound flights for the given day/month.
+    """
+    origin_filter = f"AND destination = '{dest}'" if dest else ""
+    query = f"SELECT origin, dest as destination, carrier, flight FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};"
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    daily_inbound_log = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
+    return daily_inbound_log
+
+
+@st.cache_resource
 def get_daily_outbound_log(day, month, origin=None):
     """
     Returns outbound flights for the given day/month.
     """
     origin_filter = f"AND origin = '{origin}'" if origin else ""
-    query = f"SELECT dest, carrier, flight FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};"
+    query = f"SELECT origin, dest as destination, carrier, flight FROM flights WHERE day = '{day}' AND month = '{month}' {origin_filter};"
     cursor.execute(query)
     rows = cursor.fetchall()
     daily_outbound_log = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
     return daily_outbound_log
 
 
+
+@st.cache_resource
 def get_daily_statistics(day, month, origin=None):
     '''
     Create a daily briefing DataFrame for the selected day and month.
@@ -112,35 +164,43 @@ def get_daily_statistics(day, month, origin=None):
     average_business = total_flights / num_days
     business_today = num_flight - average_business
     difference_percentage = (business_today/average_business)*100
-    daily_business = f'{month}-{day} has {difference_percentage:.2f}% business compared to average day'
 
-    df_structure = {"Date": [f"{month}-{day}"],
-                    "Today's traffic":  [num_flight],
-                    "Business today": [daily_business],
-                    "Number of unique destinations": [num_unique_destinations],
-                    "Most visited destination": [most_visited],
-                    "Least visited destination": [least_visited],}
+    df_structure = {"Flights Today": [num_flight],
+                    "Avg Flights/Day": [round(average_business, 1)],
+                    "Difference": [f"{difference_percentage:+.1f}%"],
+                    "Unique Destinations": [num_unique_destinations],
+                    "Most Visited": [most_visited],
+                    "Least Visited": [least_visited],}
 
     return pd.DataFrame(df_structure)
 
 
-def get_flight_trajectory(departing_airport,arriving_airport):
-
-    #get the tailnumber of all flights between selected airports
+@st.cache_resource
+def get_flight_trajectory(departing_airport, arriving_airport):
+    """Get aircraft type distribution for flights between two airports.
+    Either airport can be None to show all origins/destinations."""
+    filters = []
+    if departing_airport:
+        filters.append(f"flights.origin = '{departing_airport}'")
+    if arriving_airport:
+        filters.append(f"flights.dest = '{arriving_airport}'")
+    
+    where_clause = " AND ".join(filters) if filters else "1=1"
+    
     query = f"""
-            SELECT planes.type, COUNT(*)
+            SELECT planes.type, COUNT(*) AS count
             FROM flights
             JOIN planes ON flights.tailnum = planes.tailnum
-            WHERE flights.origin = '{departing_airport}'
-                AND flights.dest = '{arriving_airport}'
-            GROUP BY planes.type"""
+            WHERE {where_clause}
+            GROUP BY planes.type
+            ORDER BY count DESC"""
 
     cursor.execute(query)
     type_distribution = dict(cursor.fetchall())
     return type_distribution
 
 
-
+@st.cache_resource
 def get_carrier_delay():
     """
     Returns a DataFrame with average departure delay per airline.
@@ -174,23 +234,96 @@ def get_delayed_flight(month_range:list[str],destinations_list:list[str]):
 
 
 
-def get_top_manufacturers(destination_airport):
-
-    #return the top 5 plane manufacturers from designated airport
+@st.cache_resource
+def get_top_manufacturers(destination_airport=None, origin_airport=None):
+    """Return top 5 plane manufacturers. Either airport can be None for all."""
+    filters = []
+    if destination_airport:
+        filters.append(f"flights.dest = '{destination_airport}'")
+    if origin_airport:
+        filters.append(f"flights.origin = '{origin_airport}'")
+    
+    where_clause = " AND ".join(filters) if filters else "1=1"
 
     query = f"""
-            SELECT planes.manufacturer, COUNT(*) AS num_flights
+            SELECT planes.manufacturer as "Manufacturer", COUNT(*) AS "No. flights"
             FROM flights
             JOIN planes ON flights.tailnum = planes.tailnum
-            WHERE flights.dest = '{destination_airport}'
-            GROUP BY planes.manufacturer
-            ORDER BY num_flights DESC
+            WHERE {where_clause}
+            GROUP BY "Manufacturer"
+            ORDER BY "No. flights" DESC
             LIMIT 5;"""
 
     cursor.execute(query)
     rows = cursor.fetchall()
     top_5_manufacturers = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
     return top_5_manufacturers
+
+
+@st.cache_resource
+def get_hourly_delay_stats(origin=None):
+    """Get average departure delay by hour of day."""
+    origin_filter = "" if origin is None else f"AND origin = '{origin}'"
+    query = f"""
+        SELECT hour, AVG(dep_delay) AS avg_delay
+        FROM flights WHERE dep_delay IS NOT NULL {origin_filter}
+        GROUP BY hour ORDER BY hour;
+    """
+    return pd.read_sql(query, connection)
+
+
+@st.cache_resource
+def get_monthly_delay_stats(origin=None):
+    """Get average departure delay by month."""
+    origin_filter = "" if origin is None else f"AND origin = '{origin}'"
+    query = f"""
+        SELECT month, AVG(dep_delay) AS avg_delay
+        FROM flights WHERE dep_delay IS NOT NULL {origin_filter}
+        GROUP BY month ORDER BY month;
+    """
+    return pd.read_sql(query, connection)
+
+
+@st.cache_resource
+def get_precipitation_delay_stats(origin=None):
+    """Get average departure delay by precipitation level."""
+    origin_filter = "" if origin is None else f"AND f.origin = '{origin}'"
+    query = f"""
+        SELECT ROUND(w.precip, 1) AS precipitation,
+               AVG(f.dep_delay)   AS avg_delay
+        FROM flights f
+        JOIN weather w ON f.origin = w.origin
+            AND f.month = w.month
+            AND f.day   = w.day
+            AND f.hour  = w.hour
+        WHERE f.dep_delay IS NOT NULL
+            AND w.precip IS NOT NULL
+            {origin_filter}
+        GROUP BY ROUND(w.precip, 1)
+        ORDER BY precipitation;
+    """
+    return pd.read_sql(query, connection)
+
+
+@st.cache_resource
+def get_visibility_delay_stats(origin=None):
+    """Get average departure delay by visibility."""
+    origin_filter = "" if origin is None else f"AND f.origin = '{origin}'"
+    query = f"""
+        SELECT ROUND(w.visib) AS visibility,
+               AVG(f.dep_delay) AS avg_delay
+        FROM flights f
+        JOIN weather w ON f.origin = w.origin
+            AND f.month = w.month
+            AND f.day   = w.day
+            AND f.hour  = w.hour
+        WHERE f.dep_delay IS NOT NULL
+            AND w.visib IS NOT NULL
+            {origin_filter}
+        GROUP BY ROUND(w.visib)
+        ORDER BY visibility;
+    """
+    return pd.read_sql(query, connection)
 
 
 def get_distance_delay_regression():
@@ -259,13 +392,15 @@ def get_wind_direction():
     rows = cursor.fetchall()
 
     results = []
-    for dest, lat, lon in rows:
-        bearing_deg = _bearing(JFK_LAT, JFK_LON, lat, lon)
-        results.append({
-            'dest': dest,
-            'bearing_deg': round(bearing_deg, 1),
-            'cardinal_dir': _to_cardinal(bearing_deg),
-        })
+    if rows:
+        dests, lats, lons = zip(*rows)
+        bearings = _bearing_vec(np.array([JFK_LAT]*len(rows)), np.array([JFK_LON]*len(rows)), np.array(lats), np.array(lons))
+        for dest, bearing_deg in zip(dests, bearings):
+            results.append({
+                'dest': dest,
+                'bearing_deg': round(float(bearing_deg), 1),
+                'cardinal_dir': _to_cardinal(float(bearing_deg)),
+            })
 
     return pd.DataFrame(results)
 
@@ -302,7 +437,8 @@ def get_inner_product(flight_id):
     _, _, wind_dir, wind_speed, orig_lat, orig_lon, dest_lat, dest_lon = row
 
     # flight direction: unit vector in the bearing direction from origin to destination
-    bearing_rad = math.radians(_bearing(orig_lat, orig_lon, dest_lat, dest_lon))
+    bearing_deg = _bearing_vec(np.array([orig_lat]), np.array([orig_lon]), np.array([dest_lat]), np.array([dest_lon]))[0]
+    bearing_rad = math.radians(float(bearing_deg))
     flight_vec = (math.sin(bearing_rad), math.cos(bearing_rad))
 
     # wind vector: wind_dir is direction wind blows FROM (meteorological convention),

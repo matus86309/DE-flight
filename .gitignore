@@ -1,6 +1,5 @@
 
-# pixi environments
-.pixi
+.idea
 *.egg-info
 
 # Python bytecode

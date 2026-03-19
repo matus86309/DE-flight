@@ -1,7 +1,7 @@
 import pandas as pd
 import sqlite3
 
-DB_PATH = "../data/flights_database.db"
+DB_PATH = "./data/flights_database.db"
 connect = sqlite3.connect(DB_PATH)
 
 #table names
@@ -100,4 +100,7 @@ for i in cols:
     flights[i] = flights[i].astype(str)
 
 flights.to_sql("flights_cleaned", connect, if_exists="replace", index=False)
+connect.execute("DROP TABLE IF EXISTS flights;")
+connect.execute("ALTER TABLE flights_cleaned RENAME TO flights;")
+connect.commit()
 connect.close()
