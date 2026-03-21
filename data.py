@@ -50,6 +50,35 @@ def get_distinct_destinations():
     return pd.read_sql("SELECT DISTINCT dest FROM flights ORDER BY dest;", connection)["dest"].tolist()
 
 
+def _build_flight_filters(origin=None, dest=None, date_start=None, date_end=None, month_start=None, month_end=None):
+    """Build SQL WHERE clause and params for reusable flight filters."""
+    filters = []
+    params = []
+
+    if origin:
+        filters.append("origin = ?")
+        params.append(origin)
+
+    if dest:
+        filters.append("dest = ?")
+        params.append(dest)
+
+    if date_start:
+        filters.append("date(printf('%04d-%02d-%02d', year, month, day)) >= date(?)")
+        params.append(date_start)
+
+    if date_end:
+        filters.append("date(printf('%04d-%02d-%02d', year, month, day)) <= date(?)")
+        params.append(date_end)
+
+    if month_start and month_end:
+        filters.append("month BETWEEN ? AND ?")
+        params.extend([month_start, month_end])
+
+    where_clause = " AND ".join(filters) if filters else "1=1"
+    return where_clause, params
+
+
 def get_filtered_flight_metrics(origin=None, month_start=None, month_end=None):
     """
     Returns filtered flight metrics for a given origin and month range.
@@ -58,13 +87,11 @@ def get_filtered_flight_metrics(origin=None, month_start=None, month_end=None):
         month_start: Starting month (1-12), or None for all
         month_end: Ending month (1-12), or None for all
     """
-    filters = []
-    if origin:
-        filters.append(f"origin = '{origin}'")
-    if month_start and month_end:
-        filters.append(f"month BETWEEN {month_start} AND {month_end}")
-    
-    where_clause = " AND ".join(filters) if filters else "1=1"
+    where_clause, params = _build_flight_filters(
+        origin=origin,
+        month_start=month_start,
+        month_end=month_end,
+    )
     
     query = f"""
     SELECT 
@@ -72,11 +99,36 @@ def get_filtered_flight_metrics(origin=None, month_start=None, month_end=None):
         (SELECT COUNT(DISTINCT dest) FROM flights WHERE {where_clause}) AS unique_destinations,
         (SELECT COUNT(DISTINCT carrier) FROM flights WHERE {where_clause}) AS total_airlines
     """
-    result = pd.read_sql(query, connection).iloc[0]
+    result = pd.read_sql(query, connection, params=params + params + params).iloc[0]
     return {
         'total_flights': int(result[0]),
         'unique_destinations': int(result[1]),
         'total_airlines': int(result[2])
+    }
+
+
+def get_filtered_overview_metrics(origin=None, dest=None, date_start=None, date_end=None):
+    """Returns overview metrics filtered by origin, destination and date range."""
+    where_clause, params = _build_flight_filters(
+        origin=origin,
+        dest=dest,
+        date_start=date_start,
+        date_end=date_end,
+    )
+
+    query = f"""
+    SELECT
+        COUNT(*) AS total_flights,
+        COUNT(DISTINCT dest) AS unique_destinations,
+        COUNT(DISTINCT carrier) AS total_airlines
+    FROM flights
+    WHERE {where_clause}
+    """
+    result = pd.read_sql(query, connection, params=params).iloc[0]
+    return {
+        "total_flights": int(result["total_flights"]),
+        "unique_destinations": int(result["unique_destinations"]),
+        "total_airlines": int(result["total_airlines"]),
     }
 
 
@@ -201,22 +253,137 @@ def get_flight_trajectory(departing_airport, arriving_airport):
 
 
 @st.cache_data
-def get_carrier_delay():
+def get_carrier_delay(origin=None, dest=None, date_start=None, date_end=None):
     """
     Returns a DataFrame with average departure delay per airline.
     Displays a barplot with full airline names on the (rotated) x-axis.
     """
-    query = """
+    where_clause, params = _build_flight_filters(
+        origin=origin,
+        dest=dest,
+        date_start=date_start,
+        date_end=date_end,
+    )
+
+    query = f"""
         SELECT airlines.name, AVG(flights.dep_delay) AS avg_delay
         FROM flights
         JOIN airlines ON flights.carrier = airlines.carrier
-        WHERE flights.dep_delay IS NOT NULL
+        WHERE flights.dep_delay IS NOT NULL AND {where_clause}
         GROUP BY airlines.name
         ORDER BY avg_delay DESC;
     """
-    delay_df = pd.read_sql(query, connection)
+    delay_df = pd.read_sql(query, connection, params=params)
 
     return delay_df
+
+
+@st.cache_data
+def get_airline_frequency(origin=None, dest=None, date_start=None, date_end=None):
+    """Returns airline frequency and average delay for the selected filters."""
+    where_clause, params = _build_flight_filters(
+        origin=origin,
+        dest=dest,
+        date_start=date_start,
+        date_end=date_end,
+    )
+
+    query = f"""
+        SELECT
+            a.name AS airline,
+            COUNT(*) AS total_flights,
+            ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS flight_share_pct,
+            ROUND(AVG(f.dep_delay), 2) AS avg_dep_delay
+        FROM flights f
+        JOIN airlines a ON f.carrier = a.carrier
+        WHERE {where_clause}
+        GROUP BY a.name
+        ORDER BY total_flights DESC;
+    """
+    return pd.read_sql(query, connection, params=params)
+
+
+def get_filtered_flights_page(
+    origin=None,
+    dest=None,
+    date_start=None,
+    date_end=None,
+    search_term=None,
+    sort_by="flight_date",
+    sort_order="DESC",
+    page=1,
+    page_size=25,
+):
+    """Returns one page of filtered flights plus total rows for pagination."""
+    where_clause, params = _build_flight_filters(
+        origin=origin,
+        dest=dest,
+        date_start=date_start,
+        date_end=date_end,
+    )
+
+    search_clause = ""
+    if search_term:
+        search_clause = """
+            AND (
+                f.origin LIKE ? OR
+                f.dest LIKE ? OR
+                f.carrier LIKE ? OR
+                CAST(f.flight AS TEXT) LIKE ? OR
+                f.tailnum LIKE ? OR
+                a.name LIKE ?
+            )
+        """
+        like_term = f"%{search_term}%"
+        params.extend([like_term, like_term, like_term, like_term, like_term, like_term])
+
+    allowed_sort_cols = {
+        "flight_date": "flight_date",
+        "origin": "f.origin",
+        "destination": "f.dest",
+        "airline": "a.name",
+        "carrier": "f.carrier",
+        "flight": "f.flight",
+        "dep_delay": "f.dep_delay",
+        "arr_delay": "f.arr_delay",
+        "distance": "f.distance",
+    }
+    sort_expr = allowed_sort_cols.get(sort_by, "flight_date")
+    sort_dir = "ASC" if str(sort_order).upper() == "ASC" else "DESC"
+
+    count_query = f"""
+        SELECT COUNT(*) AS total_rows
+        FROM flights f
+        LEFT JOIN airlines a ON f.carrier = a.carrier
+        WHERE {where_clause}
+        {search_clause}
+    """
+    total_rows = int(pd.read_sql(count_query, connection, params=params).iloc[0]["total_rows"])
+
+    offset = max(page - 1, 0) * page_size
+    page_query = f"""
+        SELECT
+            date(printf('%04d-%02d-%02d', f.year, f.month, f.day)) AS flight_date,
+            f.origin,
+            f.dest AS destination,
+            f.carrier,
+            a.name AS airline,
+            f.flight,
+            f.tailnum,
+            ROUND(f.dep_delay, 1) AS dep_delay,
+            ROUND(f.arr_delay, 1) AS arr_delay,
+            ROUND(f.distance, 1) AS distance,
+            ROUND(f.air_time, 1) AS air_time
+        FROM flights f
+        LEFT JOIN airlines a ON f.carrier = a.carrier
+        WHERE {where_clause}
+        {search_clause}
+        ORDER BY {sort_expr} {sort_dir}
+        LIMIT ? OFFSET ?
+    """
+    page_params = params + [page_size, offset]
+    page_df = pd.read_sql(page_query, connection, params=page_params)
+    return page_df, total_rows
 
 
 def get_delayed_flight(month_range:list[str],destinations_list:list[str]):

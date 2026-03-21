@@ -13,7 +13,9 @@ from data import (
     get_daily_outbound_log,
     get_distinct_origins,
     get_distinct_destinations,
-    get_filtered_flight_metrics,
+    get_filtered_overview_metrics,
+    get_filtered_flights_page,
+    get_airline_frequency,
     get_hourly_delay_stats,
     get_monthly_delay_stats,
     get_precipitation_delay_stats,
@@ -48,7 +50,7 @@ st.set_page_config(page_title="NYC Flights Dashboard", layout="wide")
 # ── Navigation bar ────────────────────────────────────────────────────────────
 page = option_menu(
     menu_title=None,
-    options=["Overview", "Airport Stats", "Delay Analysis", "Daily Statistics"],
+    options=["Overview", "Aircraft Analysis", "Delay Analysis", "Daily Statistics"],
     icons=["house", "map", "clock-history", "calendar-day"],
     orientation="horizontal",
     styles={
@@ -65,26 +67,48 @@ if page == "Overview":
     st.sidebar.header("Filters")
     
     origins = get_distinct_origins()
+    destinations = get_distinct_destinations()
+
     selected_origin = st.sidebar.selectbox(
-        "Airport",
+        "Departure Airport",
         ["All"] + origins,
         index=0,
     )
-    
-    month_range = st.sidebar.slider(
-        "Select Month Range",
-        min_value=1,
-        max_value=12,
-        value=(1, 12),
+
+    selected_destination = st.sidebar.selectbox(
+        "Arrival Airport",
+        ["All"] + destinations,
+        index=0,
     )
+
+    start_date = st.sidebar.date_input(
+        "Start Date",
+        value=datetime.date(2023, 1, 1),
+        min_value=datetime.date(2023, 1, 1),
+        max_value=datetime.date(2023, 12, 31),
+    )
+
+    end_date = st.sidebar.date_input(
+        "End Date",
+        value=datetime.date(2023, 12, 31),
+        min_value=datetime.date(2023, 1, 1),
+        max_value=datetime.date(2023, 12, 31),
+    )
+
+    if end_date < start_date:
+        st.sidebar.error("End date must be after start date.")
+        st.stop()
 
     st.title("NYC Flights — Overview (2023)")
 
     origin_param = selected_origin if selected_origin != "All" else None
-    metrics = get_filtered_flight_metrics(
+    destination_param = selected_destination if selected_destination != "All" else None
+
+    metrics = get_filtered_overview_metrics(
         origin=origin_param,
-        month_start=month_range[0],
-        month_end=month_range[1],
+        dest=destination_param,
+        date_start=start_date.isoformat(),
+        date_end=end_date.isoformat(),
     )
     
     col1, col2, col3 = st.columns(3)
@@ -92,8 +116,69 @@ if page == "Overview":
     col2.metric("Unique Destinations", f"{metrics['unique_destinations']:,}")
     col3.metric("Airlines", f"{metrics['total_airlines']:,}")
 
+    st.subheader("Flights")
+    search_term = st.text_input("Search flights (carrier, airline, airport, flight no., tailnum)", "")
+
+    sort_col1, sort_col2, sort_col3 = st.columns([2, 1, 1])
+    with sort_col1:
+        sort_by = st.selectbox(
+            "Sort by",
+            ["flight_date", "origin", "destination", "airline", "carrier", "flight", "dep_delay", "arr_delay", "distance"],
+            index=0,
+        )
+    with sort_col2:
+        sort_order = st.selectbox("Order", ["DESC", "ASC"], index=0)
+    with sort_col3:
+        page_size = st.selectbox("Rows per page", [25, 50, 100], index=0)
+
+    flights_df_preview, total_rows = get_filtered_flights_page(
+        origin=origin_param,
+        dest=destination_param,
+        date_start=start_date.isoformat(),
+        date_end=end_date.isoformat(),
+        search_term=search_term.strip() or None,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=1,
+        page_size=1,
+    )
+
+    del flights_df_preview
+
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+    page_number = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
+
+    flights_df, _ = get_filtered_flights_page(
+        origin=origin_param,
+        dest=destination_param,
+        date_start=start_date.isoformat(),
+        date_end=end_date.isoformat(),
+        search_term=search_term.strip() or None,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=int(page_number),
+        page_size=page_size,
+    )
+
+    st.caption(f"Showing page {int(page_number)} of {total_pages} ({total_rows:,} flights total)")
+    st.dataframe(flights_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Airline Frequency")
+    airline_freq_df = get_airline_frequency(
+        origin=origin_param,
+        dest=destination_param,
+        date_start=start_date.isoformat(),
+        date_end=end_date.isoformat(),
+    )
+    st.dataframe(airline_freq_df, use_container_width=True, hide_index=True)
+
     st.subheader("Average Departure Delay by Airline")
-    delay_df = get_carrier_delay()
+    delay_df = get_carrier_delay(
+        origin=origin_param,
+        dest=destination_param,
+        date_start=start_date.isoformat(),
+        date_end=end_date.isoformat(),
+    )
     fig = px.bar(delay_df, x="name", y="avg_delay",
                  labels={"name": "Airline", "avg_delay": "Avg Delay (min)"})
     fig.update_layout(xaxis_tickangle=-45)
@@ -101,8 +186,8 @@ if page == "Overview":
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ── PAGE 2: Airport Stats ─────────────────────────────────────────────────────
-elif page == "Airport Stats":
+# ── PAGE 2: Aircraft Analysis ─────────────────────────────────────────────────
+elif page == "Aircraft Analysis":
     origins = get_distinct_origins()
     dests = get_distinct_destinations()
 
@@ -115,13 +200,13 @@ elif page == "Airport Stats":
     
     # Build title
     if dep == "All" and arr == "All":
-        title = "Flights: All Airports"
+        title = "Aircraft Analysis: All Airports"
     elif dep == "All":
-        title = f"Flights: All → {arr}"
+        title = f"Aircraft Analysis: All → {arr}"
     elif arr == "All":
-        title = f"Flights: {dep} → All"
+        title = f"Aircraft Analysis: {dep} → All"
     else:
-        title = f"Flights: {dep} → {arr}"
+        title = f"Aircraft Analysis: {dep} → {arr}"
     
     st.title(title)
 
