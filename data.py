@@ -120,15 +120,22 @@ def get_filtered_overview_metrics(origin=None, dest=None, date_start=None, date_
     SELECT
         COUNT(*) AS total_flights,
         COUNT(DISTINCT dest) AS unique_destinations,
-        COUNT(DISTINCT carrier) AS total_airlines
+        COUNT(DISTINCT carrier) AS total_airlines,
+        ROUND(AVG(distance), 1) AS avg_distance
     FROM flights
     WHERE {where_clause}
     """
     result = pd.read_sql(query, connection, params=params).iloc[0]
+    avg_distance_raw = result["avg_distance"]
+    avg_distance_value = 0.0 if pd.isna(avg_distance_raw) else float(avg_distance_raw)
+
     return {
         "total_flights": int(result["total_flights"]),
         "unique_destinations": int(result["unique_destinations"]),
         "total_airlines": int(result["total_airlines"]),
+        "avg_distance": avg_distance_value,
+        "avg_flight_distance": avg_distance_value,
+        "average_flight_distance": avg_distance_value,
     }
 
 
@@ -176,6 +183,71 @@ def get_daily_outbound_log(day, month, origin=None):
     rows = cursor.fetchall()
     daily_outbound_log = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
     return daily_outbound_log
+
+
+@st.cache_data
+def get_daily_insights_summary(day, month, origin=None):
+    """Return core KPI statistics for the selected day."""
+    origin_filter = "AND origin = ?" if origin else ""
+    params = [day, month] + ([origin] if origin else [])
+
+    query = f"""
+        SELECT
+            COUNT(*) AS total_flights,
+            ROUND(AVG(dep_delay), 1) AS avg_dep_delay,
+            ROUND(AVG(arr_delay), 1) AS avg_arr_delay,
+            ROUND(100.0 * AVG(CASE WHEN dep_delay <= 15 THEN 1.0 ELSE 0.0 END), 1) AS on_time_pct,
+            COUNT(DISTINCT carrier) AS active_airlines
+        FROM flights
+        WHERE day = ? AND month = ? {origin_filter}
+    """
+    result = pd.read_sql(query, connection, params=params).iloc[0]
+
+    return {
+        "total_flights": int(result["total_flights"] or 0),
+        "avg_dep_delay": 0.0 if pd.isna(result["avg_dep_delay"]) else float(result["avg_dep_delay"]),
+        "avg_arr_delay": 0.0 if pd.isna(result["avg_arr_delay"]) else float(result["avg_arr_delay"]),
+        "on_time_pct": 0.0 if pd.isna(result["on_time_pct"]) else float(result["on_time_pct"]),
+        "active_airlines": int(result["active_airlines"] or 0),
+    }
+
+
+@st.cache_data
+def get_daily_hourly_profile(day, month, origin=None):
+    """Return hourly flight volume and delay profile for the selected day."""
+    origin_filter = "AND origin = ?" if origin else ""
+    params = [day, month] + ([origin] if origin else [])
+
+    query = f"""
+        SELECT
+            CAST(hour AS INTEGER) AS hour,
+            COUNT(*) AS flights,
+            ROUND(AVG(dep_delay), 1) AS avg_dep_delay
+        FROM flights
+        WHERE day = ? AND month = ? {origin_filter}
+        GROUP BY CAST(hour AS INTEGER)
+        ORDER BY hour
+    """
+    return pd.read_sql(query, connection, params=params)
+
+
+@st.cache_data
+def get_daily_carrier_mix(day, month, origin=None):
+    """Return per-airline flight counts for the selected day."""
+    origin_filter = "AND f.origin = ?" if origin else ""
+    params = [day, month] + ([origin] if origin else [])
+
+    query = f"""
+        SELECT
+            a.name AS airline,
+            COUNT(*) AS flights
+        FROM flights f
+        JOIN airlines a ON f.carrier = a.carrier
+        WHERE f.day = ? AND f.month = ? {origin_filter}
+        GROUP BY a.name
+        ORDER BY flights DESC
+    """
+    return pd.read_sql(query, connection, params=params)
 
 
 
@@ -290,15 +362,15 @@ def get_airline_frequency(origin=None, dest=None, date_start=None, date_end=None
 
     query = f"""
         SELECT
-            a.name AS airline,
-            COUNT(*) AS total_flights,
-            ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS flight_share_pct,
-            ROUND(AVG(f.dep_delay), 2) AS avg_dep_delay
+            a.name AS "Airline",
+            COUNT(*) AS "Flights",
+            ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS "Share (%)",
+            ROUND(AVG(f.dep_delay), 2) AS "Avg Departure Delay (min)"
         FROM flights f
         JOIN airlines a ON f.carrier = a.carrier
         WHERE {where_clause}
         GROUP BY a.name
-        ORDER BY total_flights DESC;
+        ORDER BY "Flights" DESC;
     """
     return pd.read_sql(query, connection, params=params)
 
@@ -338,7 +410,7 @@ def get_filtered_flights_page(
         params.extend([like_term, like_term, like_term, like_term, like_term, like_term])
 
     allowed_sort_cols = {
-        "flight_date": "flight_date",
+        "flight_date": "date(printf('%04d-%02d-%02d', f.year, f.month, f.day))",
         "origin": "f.origin",
         "destination": "f.dest",
         "airline": "a.name",
@@ -363,17 +435,17 @@ def get_filtered_flights_page(
     offset = max(page - 1, 0) * page_size
     page_query = f"""
         SELECT
-            date(printf('%04d-%02d-%02d', f.year, f.month, f.day)) AS flight_date,
-            f.origin,
-            f.dest AS destination,
-            f.carrier,
-            a.name AS airline,
-            f.flight,
-            f.tailnum,
-            ROUND(f.dep_delay, 1) AS dep_delay,
-            ROUND(f.arr_delay, 1) AS arr_delay,
-            ROUND(f.distance, 1) AS distance,
-            ROUND(f.air_time, 1) AS air_time
+            date(printf('%04d-%02d-%02d', f.year, f.month, f.day)) AS "Date",
+            f.origin AS "From",
+            f.dest AS "To",
+            f.carrier AS "Carrier",
+            a.name AS "Airline",
+            f.flight AS "Flight",
+            f.tailnum AS "Tail Number",
+            ROUND(f.dep_delay, 1) AS "Departure Delay (min)",
+            ROUND(f.arr_delay, 1) AS "Arrival Delay (min)",
+            ROUND(f.distance, 1) AS "Distance (mi)",
+            ROUND(f.air_time, 1) AS "Air Time (min)"
         FROM flights f
         LEFT JOIN airlines a ON f.carrier = a.carrier
         WHERE {where_clause}
@@ -403,7 +475,7 @@ def get_delayed_flight(month_range:list[str],destinations_list:list[str]):
 
 @st.cache_data
 def get_top_manufacturers(destination_airport=None, origin_airport=None):
-    """Return top 5 plane manufacturers. Either airport can be None for all."""
+    """Return plane manufacturers. Either airport can be None for all."""
     filters = []
     if destination_airport:
         filters.append(f"flights.dest = '{destination_airport}'")
@@ -413,18 +485,17 @@ def get_top_manufacturers(destination_airport=None, origin_airport=None):
     where_clause = " AND ".join(filters) if filters else "1=1"
 
     query = f"""
-            SELECT planes.manufacturer as "Manufacturer", COUNT(*) AS "No. flights"
+            SELECT planes.manufacturer as "Manufacturer", COUNT(*) AS "Flights"
             FROM flights
             JOIN planes ON flights.tailnum = planes.tailnum
             WHERE {where_clause}
             GROUP BY "Manufacturer"
-            ORDER BY "No. flights" DESC
-            LIMIT 5;"""
+            ORDER BY "Flights" DESC;"""
 
     cursor.execute(query)
     rows = cursor.fetchall()
-    top_5_manufacturers = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
-    return top_5_manufacturers
+    manufacturers_df = pd.DataFrame(rows, columns=[x[0] for x in cursor.description])
+    return manufacturers_df
 
 
 @st.cache_data
@@ -449,6 +520,90 @@ def get_monthly_delay_stats(origin=None):
         GROUP BY month ORDER BY month;
     """
     return pd.read_sql(query, connection)
+
+
+@st.cache_data
+def get_airport_overview_stats(origin=None):
+    """Return summary stats for the Airport Overview page."""
+    where_clause, params = _build_flight_filters(origin=origin)
+
+    totals_query = f"""
+        SELECT
+            COUNT(*) AS total_flights,
+            COUNT(DISTINCT carrier) AS total_airlines,
+            COUNT(DISTINCT dest) AS unique_destinations,
+            ROUND(AVG(distance), 1) AS avg_distance
+        FROM flights
+        WHERE {where_clause}
+    """
+    totals = pd.read_sql(totals_query, connection, params=params).iloc[0]
+
+    most_query = f"""
+        SELECT dest, COUNT(*) AS flights
+        FROM flights
+        WHERE {where_clause}
+        GROUP BY dest
+        ORDER BY flights DESC
+        LIMIT 1
+    """
+    least_query = f"""
+        SELECT dest, COUNT(*) AS flights
+        FROM flights
+        WHERE {where_clause}
+        GROUP BY dest
+        ORDER BY flights ASC
+        LIMIT 1
+    """
+
+    most = pd.read_sql(most_query, connection, params=params)
+    least = pd.read_sql(least_query, connection, params=params)
+
+    most_label = "N/A"
+    least_label = "N/A"
+    if not most.empty:
+        most_label = f"{most.iloc[0]['dest']} ({int(most.iloc[0]['flights'])})"
+    if not least.empty:
+        least_label = f"{least.iloc[0]['dest']} ({int(least.iloc[0]['flights'])})"
+
+    avg_distance_raw = totals["avg_distance"]
+    avg_distance_value = 0.0 if pd.isna(avg_distance_raw) else float(avg_distance_raw)
+
+    return {
+        "total_flights": int(totals["total_flights"]),
+        "total_airlines": int(totals["total_airlines"]),
+        "unique_destinations": int(totals["unique_destinations"]),
+        "avg_distance": avg_distance_value,
+        "avg_flight_distance": avg_distance_value,
+        "average_flight_distance": avg_distance_value,
+        "most_visited": most_label,
+        "least_visited": least_label,
+    }
+
+
+@st.cache_data
+def get_monthly_flight_volume(origin=None):
+    """Return 12-month flight volume aggregated by month."""
+    where_clause, params = _build_flight_filters(origin=origin)
+    query = f"""
+        SELECT month, COUNT(*) AS flights
+        FROM flights
+        WHERE {where_clause}
+        GROUP BY month
+        ORDER BY month
+    """
+    return pd.read_sql(query, connection, params=params)
+
+
+@st.cache_data
+def get_distance_distribution(origin=None):
+    """Return per-flight distance values for histogram plotting."""
+    where_clause, params = _build_flight_filters(origin=origin)
+    query = f"""
+        SELECT distance
+        FROM flights
+        WHERE distance IS NOT NULL AND {where_clause}
+    """
+    return pd.read_sql(query, connection, params=params)
 
 
 @st.cache_data
