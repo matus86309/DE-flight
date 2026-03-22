@@ -442,10 +442,10 @@ def get_filtered_flights_page(
             a.name AS "Airline",
             f.flight AS "Flight",
             f.tailnum AS "Tail Number",
-            ROUND(f.dep_delay, 1) AS "Departure Delay (min)",
-            ROUND(f.arr_delay, 1) AS "Arrival Delay (min)",
-            ROUND(f.distance, 1) AS "Distance (mi)",
-            ROUND(f.air_time, 1) AS "Air Time (min)"
+            CAST(ROUND(f.dep_delay, 0) AS INTEGER) AS "Departure Delay (min)",
+            CAST(ROUND(f.arr_delay, 0) AS INTEGER) AS "Arrival Delay (min)",
+            CAST(ROUND(f.distance, 0) AS INTEGER) AS "Distance (mi)",
+            CAST(ROUND(f.air_time, 0) AS INTEGER) AS "Air Time (min)"
         FROM flights f
         LEFT JOIN airlines a ON f.carrier = a.carrier
         WHERE {where_clause}
